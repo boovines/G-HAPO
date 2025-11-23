@@ -1,13 +1,8 @@
-# Tinker API Client
 tinker
-
-# Hugging Face libraries for tokenization and datasets
+tinker-cookbook
 transformers>=4.35.0
 datasets>=2.14.0
-
-# Math and Tensor operations
 torch>=2.0.0
 numpy
-
-# Evaluation utilities
 math-verify
+chz

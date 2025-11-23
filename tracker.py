@@ -4,7 +4,7 @@ import numpy as np
 from math_utils import is_correct 
 from utils import MAX_LEN, compute_len_reward, compute_len_reward_linear, compute_repetition_penalty_reward
 
-class TinkerHistoryTracker:
+class HistoryTracker:
     def __init__(self, tokenizer, w_lr=1.0, type_lr="cosine", rep_ngram_size=3, rep_penalty=0.0, mode="min"):
         self.tokenizer = tokenizer
         self.w_lr = w_lr
