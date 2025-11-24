@@ -48,31 +48,34 @@ def to_list_float(data):
 class Config:
     # --- Logging ---
     wandb_project: str | None = "SEPO"
-    wandb_name: str | None = "hapo_replication"
+    wandb_name: str | None = "hapo_lite_100"
     
     # --- Data & Paths ---
-    train_dataset: str = "datasets/train_samples_math_2000.json"
+    # LIGHTWEIGHT DATASET (100 Samples)
+    train_dataset: str = "datasets/train_samples_math_100.json" 
     valid_dataset: str = "datasets/valid_samples_dsr_500.json"
     base_url: str | None = None
-    log_path: str = "../tinker-experiments/hapo-replication"
+    log_path: str = "../tinker-experiments/hapo-lite-100"
     
     # --- Model ---
+    # Defaulting to 4B. 
+    # Use 1.5B if available for max speed.
     model_name: str = "Qwen/Qwen3-4B-Instruct-2507" 
     
     # --- HAPO Training Hyperparameters ---
-    num_epochs: int = 5
+    num_epochs: int = 10          # Increased epochs for small data
     learning_rate: float = 1e-5 
     batch_size: int = 2           
     group_size: int = 2           
     gradient_accumulation_steps: int = 4 
     
     # Context Length
-    max_tokens: int = 30000       
+    max_tokens: int = 8192       
     
     lora_rank: int = 8            
     
-    # 250 Optimizer Steps = 1 Epoch
-    save_every: int = 250          
+    # Save every 5 epochs (approx 60 steps)
+    save_every: int = 60          
     
     # --- Reward & Algorithm Parameters ---
     beta: float = 0.04            
@@ -213,9 +216,7 @@ def main(config: Config):
         temperature=config.temperature
     )
     
-    adam_params = types.AdamParams(
-        learning_rate=config.learning_rate, beta1=0.9, beta2=0.95, eps=1e-8
-    )
+    # Note: adam_params will be instantiated per step to handle LR scheduling
 
     steps_per_epoch = (len(train_dataset) // config.batch_size) // config.gradient_accumulation_steps
     total_optimizer_steps = steps_per_epoch * config.num_epochs
@@ -325,33 +326,25 @@ def main(config: Config):
                     content = parsed_msg["content"] if parsed_msg and "content" in parsed_msg else ""
                     group_texts.append(content)
 
-                # --- REFERENCE FORWARD PASS (FIXED: Return is direct list) ---
+                # --- REFERENCE FORWARD PASS (Use compute_logprobs list directly) ---
                 ref_logprobs_sums = []
                 for seq_tokens, ob_len in zip(group_tokens, group_ob_lens):
                     full_tokens_safe = to_list_int(seq_tokens)
                     
                     try:
-                        # compute_logprobs returns the list of logprobs directly
-                        # Structure: [None, logprob_token1, logprob_token2, ...]
-                        # The return type is NOT an object with .logprobs
                         ref_model_input = types.ModelInput.from_ints(tokens=full_tokens_safe)
                         logprobs_list = ref_client.compute_logprobs(ref_model_input).result()
                         
                         if not logprobs_list:
-                            logger.warning("DEBUG: compute_logprobs returned empty list/None.")
+                            # Fallback to avoid crash if ref model fails
                             ref_sum = sum(group_logprobs[group_tokens.index(seq_tokens)])
                         else:
-                            # Filter None (usually at index 0) and slice for Response
-                            # Prompt logprobs are included, so we slice from len(prompt)
                             prompt_len = len(prompt_tokens)
-                            
-                            # Safety: ensure list is long enough
                             if len(logprobs_list) > prompt_len:
                                 response_logprobs = logprobs_list[prompt_len:]
                                 clean_response_logprobs = [lp if lp is not None else 0.0 for lp in response_logprobs]
                                 ref_sum = sum(clean_response_logprobs)
                             else:
-                                logger.warning("DEBUG: logprobs list shorter than prompt?")
                                 ref_sum = 0.0
                         
                         ref_logprobs_sums.append(ref_sum)
@@ -372,6 +365,8 @@ def main(config: Config):
                 for i in range(len(base_rewards)):
                     sampled_sum = sum(group_logprobs[i])
                     ref_sum = ref_logprobs_sums[i]
+                    
+                    # KL = Student - Teacher
                     kl_val = sampled_sum - ref_sum
                     
                     penalized_reward = base_rewards[i] - (config.beta * kl_val)
@@ -423,20 +418,36 @@ def main(config: Config):
             accum_metrics["kl"].append(avg_kl)
 
             if ((batch_i + 1) % config.gradient_accumulation_steps == 0) or ((batch_i + 1) == n_batches_per_epoch):
-                _ = training_client.optim_step(adam_params).result()
+                
+                # --- LINEAR LR SCHEDULER ---
+                progress = global_step / total_optimizer_steps
+                current_lr = config.learning_rate * (1.0 - progress)
+                current_lr = max(0.0, current_lr)
+                
+                # Create NEW immutable AdamParams object for each step
+                current_adam_params = types.AdamParams(
+                    learning_rate=current_lr, 
+                    beta1=0.9, 
+                    beta2=0.95, 
+                    eps=1e-8
+                )
+
+                _ = training_client.optim_step(current_adam_params).result()
                 
                 final_reward = sum(accum_metrics["reward"]) / len(accum_metrics["reward"]) if accum_metrics["reward"] else 0.0
                 final_kl = sum(accum_metrics["kl"]) / len(accum_metrics["kl"]) if accum_metrics["kl"] else 0.0
                 
+                avg_kl_per_token = final_kl / 200.0 # Approx
+                
                 metrics = {
                     "progress/global_step": global_step,
                     "progress/epoch": epoch + 1,
-                    "optim/lr": config.learning_rate,
+                    "optim/lr": current_lr,
                     "reward/mean": final_reward,
                     "metrics/kl": final_kl
                 }
                 ml_logger.log_metrics(metrics, step=global_step)
-                logger.info(f"Step {global_step} | Reward: {final_reward:.4f} | KL: {final_kl:.4f}")
+                logger.info(f"Step {global_step} | LR: {current_lr:.2e} | Reward: {final_reward:.4f} | KL (Seq): {final_kl:.4f} | ~KL/tok: {avg_kl_per_token:.4f}")
 
                 accum_metrics = {"reward": [], "kl": []}
                 global_step += 1
