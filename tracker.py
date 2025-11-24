@@ -4,7 +4,7 @@ import os
 import logging
 import numpy as np
 
-from math_utils import is_correct 
+from evaluation.math_utils import is_correct 
 from utils import MAX_LEN, compute_len_reward, compute_len_reward_linear, compute_repetition_penalty_reward
 
 logger = logging.getLogger(__name__)

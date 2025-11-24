@@ -7,10 +7,16 @@ from argparse import ArgumentParser
 
 parser = ArgumentParser()
 parser.add_argument("--path", type=str, help="Path to the parquet file produced by lighteval for a specific evaluation run.")
+parser.add_argument("--tokenizer", type=str, default="Qwen/Qwen2.5-7B-Instruct", help="Tokenizer to use for length calculation")
 args = parser.parse_args()
 path = args.path
 
-tokenizer = AutoTokenizer.from_pretrained("deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B")
+try:
+    tokenizer = AutoTokenizer.from_pretrained(args.tokenizer)
+except Exception:
+    # Fallback if specific tokenizer fails (e.g. invalid repo)
+    print(f"Warning: Could not load {args.tokenizer}, falling back to Qwen/Qwen2.5-7B-Instruct")
+    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-7B-Instruct")
 
 lens = []
 

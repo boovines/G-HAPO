@@ -27,7 +27,7 @@ Task to evaluate LLMs on the training set of the Kaggle AIMO competition: https:
 
 from lighteval.metrics.metrics import Metrics
 from lighteval.tasks.lighteval_task import LightevalTaskConfig
-from lighteval.tasks.requests import Doc
+from lighteval.tasks.requests import Doc, SamplingMethod
 import lighteval.tasks.default_prompts as prompt
 
 from lighteval.metrics.dynamic_metrics import (
@@ -44,11 +44,7 @@ from lighteval.metrics.normalizations import (
     gsm8k_normalizer,
 )
 
-from lighteval.metrics.utils.metric_utils import (
-    MetricCategory,
-    MetricUseCase,
-    SampleLevelMetric,
-)
+from lighteval.metrics.utils.metric_utils import SampleLevelMetric
 
 import numpy as np
 
@@ -59,15 +55,13 @@ pass_at_1_4n_gsm8k = SampleLevelMetric(
         n=4,
         strip_strings=True, normalize_pred=gsm8k_normalizer, normalize_gold=gsm8k_normalizer
     ).compute,
-    category=MetricCategory.GENERATIVE_SAMPLING,
-    use_case=MetricUseCase.MATH,
+    category=SamplingMethod.GENERATIVE,
     corpus_level_fn=np.mean,
     higher_is_better=True,
 )
 
 gsm8k_custom = LightevalTaskConfig(
     name="gsm8k",
-    suite=["custom"],
     prompt_function=prompt.gsm8k,
     hf_repo="gsm8k",
     hf_subset="main",
@@ -76,8 +70,7 @@ gsm8k_custom = LightevalTaskConfig(
     few_shots_split=None,
     few_shots_select="random_sampling_from_train",
     generation_size=32768,
-    metric=[Metrics.quasi_exact_match_gsm8k, Metrics.maj_at_8_gsm8k, pass_at_1_4n_gsm8k],
-    trust_dataset=True,
+    metrics=[Metrics.quasi_exact_match_gsm8k, Metrics.maj_at_8_gsm8k, pass_at_1_4n_gsm8k],
     version=0,
 )
 

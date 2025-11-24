@@ -27,13 +27,24 @@ Task to evaluate LLMs on the training set of the Kaggle AIMO competition: https:
 
 from lighteval.metrics.metrics import Metrics
 from lighteval.tasks.lighteval_task import LightevalTaskConfig
-from lighteval.tasks.requests import Doc
+from lighteval.tasks.requests import Doc, SamplingMethod
 import lighteval.tasks.default_prompts as prompt
 
+from lighteval.metrics.metrics_sample import PassAtK
+from lighteval.metrics.utils.metric_utils import SampleLevelMetric
+import numpy as np
 
-math_500 = LightevalTaskConfig(
-    name="math_500",
-    suite=["custom"],
+# Create custom pass@1 metric with k=1 and n=4 for math
+pass_at_1_4n_math = SampleLevelMetric(
+    metric_name="math_pass@1:4_samples",
+    sample_level_fn=PassAtK(k=1, n=4).compute,
+    category=SamplingMethod.GENERATIVE,
+    corpus_level_fn=np.mean,
+    higher_is_better=True,
+)
+
+math_500_custom = LightevalTaskConfig(
+    name="math_500_custom",
     prompt_function=prompt.math_500,
     hf_repo="HuggingFaceH4/MATH-500",
     hf_subset="default",
@@ -42,9 +53,9 @@ math_500 = LightevalTaskConfig(
     few_shots_split=None,
     few_shots_select=None,
     generation_size=32768,
-    metric=[Metrics.math_pass_at_1_4n],
+    metrics=[pass_at_1_4n_math],
     version=1,
 )
 
 # STORE YOUR EVALS
-TASKS_TABLE = [math_500]
+TASKS_TABLE = [math_500_custom]
