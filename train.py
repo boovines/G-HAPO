@@ -1,7 +1,7 @@
 import logging
 import time
 import os
-from pathlib import Path
+import pickle
 from concurrent.futures import Future
 
 import chz
@@ -55,42 +55,46 @@ class Config:
     train_dataset: str = "datasets/train_samples_math_100.json" 
     valid_dataset: str = "datasets/valid_samples_dsr_500.json"
     base_url: str | None = None
-    log_path: str = "/tmp/tinker-experiments/grpo-math-4b"
-    model_name: str = "Qwen/Qwen3-4B-Instruct-2507"
-
-    batch_size: int = 4
-    group_size: int = 4
-    learning_rate: float = 1e-5
-    lora_rank: int = 8
-    save_every: int = 10
-    max_tokens: int = 800
-
-    # Reward Hyperparams
-    w_lr: float = 1.0
-    type_lr: str = "cosine"
-    temperature: float = 0.7
-    mode: str = "min" # 'min' or 'mean'
+    log_path: str = "../tinker-experiments/hapo-lite-100"
+    
+    # --- Model ---
+    # Defaulting to 4B. 
+    # Use 1.5B if available for max speed.
+    model_name: str = "Qwen/Qwen3-4B-Instruct-2507" 
+    
+    # --- HAPO Training Hyperparameters ---
+    num_epochs: int = 10          # Increased epochs for small data
+    learning_rate: float = 1e-5 
+    batch_size: int = 2           
+    group_size: int = 2           
+    gradient_accumulation_steps: int = 4 
+    
+    # Context Length
+    max_tokens: int = 8192       
+    
+    lora_rank: int = 8            
+    
+    # Save every 5 epochs (approx 60 steps)
+    save_every: int = 60          
+    
+    # --- Reward & Algorithm Parameters ---
+    beta: float = 0.04            
+    w_lr: float = 1.0             
+    clip_c: float = -0.7          
+    type_lr: str = "cosine"       
+    mode: str = "min"             
+    
+    # --- Sampling ---
+    temperature: float = 0.7      
+    
+    # Evaluation Params
+    eval_temperature: float = 0.6 
+    eval_top_p: float = 0.95      
+    eval_batch_size: int = 4
+    
+    # Repetition Penalty
     rep_ngram_size: int = 3
     rep_penalty: float = 0.0
-    
-    # Training Hyperparams
-    gradient_accumulation_steps: int = 1
-    num_epochs: int = 1
-    beta: float = 0.1  # KL penalty coefficient
-    
-    # API
-    tinker_api_key: str | None = None
-
-
-def load_env_file():
-    env_path = Path(".env")
-    if env_path.exists():
-        with open(env_path) as f:
-            for line in f:
-                line = line.strip()
-                if line and not line.startswith('#') and '=' in line:
-                    key, value = line.split('=', 1)
-                    os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
 
 
 def evaluate(client, dataset, renderer, config):
@@ -98,61 +102,59 @@ def evaluate(client, dataset, renderer, config):
     sampling_params = tinker.types.SamplingParams(
         max_tokens=config.max_tokens,
         stop=renderer.get_stop_sequences(),
-        temperature=config.temperature
+        temperature=config.eval_temperature,
+        top_p=config.eval_top_p
     )
     
     correct_count = 0
     total_count = 0
     
-    for example in dataset:
-        q_str = example["q_str"]
-        ground_truth = example["ground_truth"]
+    n_batches = (len(dataset) + config.eval_batch_size - 1) // config.eval_batch_size
+    
+    for i in range(n_batches):
+        batch = dataset.select(range(
+            i * config.eval_batch_size, 
+            min((i + 1) * config.eval_batch_size, len(dataset))
+        ))
         
-        convo = [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": q_str}
-        ]
-        model_input = renderer.build_generation_prompt(convo)
+        prompt_futures = []
+        ground_truths = batch["ground_truth"]
         
-        # Sample 4 times for pass@1
-        sample_futures = []
-        for _ in range(4):
-            sample_futures.append(
+        for q_str in batch["q_str"]:
+            convo = [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": q_str}
+            ]
+            model_input = renderer.build_generation_prompt(convo)
+            
+            prompt_futures.append(
                 client.sample(
                     prompt=model_input,
                     num_samples=1,
-                    sampling_params=sampling_params,
+                    sampling_params=sampling_params
                 )
             )
-        
-        # Check if any of the 4 samples is correct
-        is_correct_any = False
-        for future in sample_futures:
-            res = future.result()
-            s_tokens = res.sequences[0].tokens
-            parsed_msg, _ = renderer.parse_response(s_tokens)
-            content = parsed_msg["content"] if parsed_msg and "content" in parsed_msg else ""
             
-            if is_correct(content, ground_truth):
-                is_correct_any = True
-                break
-        
-        if is_correct_any:
-            correct_count += 1
-        total_count += 1
-    
+        for future, gt in zip(prompt_futures, ground_truths):
+            try:
+                result = future.result()
+                tokens = result.sequences[0].tokens
+                parsed, _ = renderer.parse_response(tokens)
+                content = parsed["content"] if parsed and "content" in parsed else ""
+                
+                if is_correct(content, gt, use_math_verify=True):
+                    correct_count += 1
+            except Exception as e:
+                logger.error(f"Error during eval sample: {e}")
+                
+            total_count += 1
+            
     pass_at_1 = correct_count / total_count if total_count > 0 else 0.0
     logger.info(f"Validation Pass@1: {pass_at_1:.4f} ({correct_count}/{total_count})")
     return pass_at_1
 
 
 def main(config: Config):
-    # Load .env file if it exists
-    load_env_file()
-
-    # Set up API key
-    if config.tinker_api_key:
-        os.environ["TINKER_API_KEY"] = config.tinker_api_key
     ml_logger = ml_log.setup_logging(
         log_dir=config.log_path,
         wandb_project=config.wandb_project,
