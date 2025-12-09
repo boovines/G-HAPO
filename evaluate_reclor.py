@@ -19,7 +19,6 @@ logging.getLogger("httpx").setLevel(logging.WARN)
 import os
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
-
 @chz.chz
 class Config:
     max_tokens: int = 8192
@@ -116,12 +115,15 @@ def evaluate(client, dataset: List[Dict], renderer, config: Config):
             )
         
         batch_correct = 0
-        for future, gt in zip(prompt_futures, ground_truths):
+        for idx, (future, gt) in enumerate(zip(prompt_futures, ground_truths)):
             try:
                 result = future.result()
                 tokens = result.sequences[0].tokens
                 parsed, _ = renderer.parse_response(tokens)
                 content = parsed["content"] if parsed and "content" in parsed else ""
+
+                if idx % 5 == 0:
+                    print(f"Sample {idx} Response: {content}")
                 
                 if is_correct_textual(content, gt):
                     correct_count += 1
@@ -169,10 +171,7 @@ def format_reclor_question(example: Dict[str, Any]) -> str:
 
 def main(config: Config):
     # Configure logging
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-    )
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
     
     # Load ReClor test dataset
     try:
@@ -194,26 +193,9 @@ def main(config: Config):
     
     # Prepare dataset format
     prepared_dataset = []
-    for example in dataset:
-        # ReClor uses integer labels 0-3 in some versions, or letters.
-        # Assuming label is 0-3 based on standard ReClor.
-        # If it's not present (test set might not have labels?), we can't evaluate accuracy.
-        # But usually for local eval we have labels.
-        # Let's check if 'label' is in example.
-        if "label" not in example:
-            # If no label, we can't evaluate. 
-            # But the user asked for an evaluation script, so we assume labels exist.
-            # If this is the official test set, it might NOT have labels.
-            # But "evaluate" implies we can check correctness.
-            # Let's assume there is a "label" field.
-            continue
-            
+    for example in dataset:            
         label_idx = example["label"]
-        # Convert index to letter if it's an integer
-        if isinstance(label_idx, int):
-            ground_truth = chr(ord('A') + label_idx)
-        else:
-            ground_truth = str(label_idx)
+        ground_truth = chr(ord('A') + label_idx)
 
         prepared_dataset.append({
             "q_str": format_reclor_question(example),
@@ -233,8 +215,10 @@ def main(config: Config):
     
     # Create sampling client
     service_client = tinker.ServiceClient()
-    sampling_client = service_client.create_sampling_client(base_model=model_name)
-    logger.info(f"Created sampling client for model: {model_name}")
+    training_client = service_client.create_lora_training_client(base_model=model_name, rank=8)
+    training_client.load_state("tinker://d88742cc-b842-58bd-9c6e-16281f28b3a0:train:0/weights/000120")
+    sampling_client = training_client.save_weights_and_get_sampling_client(name="HAPO")
+    logger.info(f"Created sampling client for HAPO model")
     
     # Run evaluation
     pass_at_1, average_token_length, correct_count, total_count = evaluate(sampling_client, prepared_dataset, renderer, config)

@@ -3,12 +3,9 @@ from datasets import load_dataset
 import tinker
 import torch
 from tinker import types
-from tinker.types.tensor_data import TensorData
-import tinker_cookbook.checkpoint_utils as checkpoint_utils
 import tinker_cookbook.model_info as model_info
 import tinker_cookbook.renderers as renderers
 from tinker_cookbook.tokenizer_utils import get_tokenizer
-from tinker_cookbook.utils import ml_log
 import logging
 from tqdm import tqdm
 
@@ -17,7 +14,6 @@ from math_utils import is_correct
 
 logger = logging.getLogger(__name__)
 logging.getLogger("httpx").setLevel(logging.WARN)
-
 
 @chz.chz
 class Config:
@@ -33,7 +29,7 @@ def evaluate(client, dataset, renderer, config):
     logger.info(f"Batch size: {config.eval_batch_size}")
     logger.info(f"Temperature: {config.eval_temperature}, Top-p: {config.eval_top_p}")
     
-    sampling_params = tinker.types.SamplingParams(
+    sampling_params = types.SamplingParams(
         max_tokens=config.max_tokens,
         stop=renderer.get_stop_sequences(),
         temperature=config.eval_temperature,
@@ -50,10 +46,7 @@ def evaluate(client, dataset, renderer, config):
     pbar = tqdm(total=len(dataset), desc="Evaluating", unit="examples")
     
     for i in range(n_batches):
-        batch = dataset.select(range(
-            i * config.eval_batch_size, 
-            min((i + 1) * config.eval_batch_size, len(dataset))
-        ))
+        batch = dataset.select(range(i * config.eval_batch_size, min((i + 1) * config.eval_batch_size, len(dataset))))
         
         batch_size = len(batch)
         prompt_futures = []
@@ -75,12 +68,15 @@ def evaluate(client, dataset, renderer, config):
             )
         
         batch_correct = 0
-        for future, gt in zip(prompt_futures, ground_truths):
+        for idx, (future, gt) in enumerate(zip(prompt_futures, ground_truths)):
             try:
                 result = future.result()
                 tokens = result.sequences[0].tokens
                 parsed, _ = renderer.parse_response(tokens)
                 content = parsed["content"] if parsed and "content" in parsed else ""
+
+                if idx % 5 == 0:
+                    print(f"Sample {idx} Response: {content}")
                 
                 if is_correct(content, gt, use_math_verify=True):
                     correct_count += 1
@@ -148,8 +144,10 @@ def main(config: Config):
     
     # Create sampling client
     service_client = tinker.ServiceClient()
-    sampling_client = service_client.create_sampling_client(base_model=model_name)
-    logger.info(f"Created sampling client for model: {model_name}")
+    training_client = service_client.create_lora_training_client(base_model=model_name, rank=8)
+    training_client.load_state("tinker://d88742cc-b842-58bd-9c6e-16281f28b3a0:train:0/weights/000120")
+    sampling_client = training_client.save_weights_and_get_sampling_client(name="HAPO")
+    logger.info(f"Created sampling client for HAPO model")
     
     # Run evaluation
     pass_at_1, average_token_length, correct_count, total_count = evaluate(sampling_client, gsm8k_test, renderer, config)

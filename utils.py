@@ -2,11 +2,6 @@ import math
 
 MAX_LEN = 100000
 
-# These constants are still useful for defining boundaries if needed, 
-# though the new dictionary-based tracker handles dynamic sizes better.
-MAX_TRAIN_SET_SIZE = 10000
-MAX_VALID_SET_SIZE = 1000
-
 def compute_len_reward_linear(history_len, seq_len, is_corr, prompt_idx, consider_readability: bool, tolerance_ratio: float, w_lr: float):
     """
     Calculates a linear reward based on the ratio between the current sequence length

@@ -1,11 +1,8 @@
 import logging
-import time
 import os
-import pickle
-from concurrent.futures import Future
 
 import chz
-import datasets
+from datasets import load_dataset
 import tinker
 import torch
 from tinker import types
@@ -16,33 +13,14 @@ import tinker_cookbook.renderers as renderers
 from tinker_cookbook.tokenizer_utils import get_tokenizer
 from tinker_cookbook.utils import ml_log
 
-# --- Custom Imports ---
 from tracker import HistoryTracker
 from prompting_utils import SYSTEM_PROMPT
 from math_utils import is_correct
-from utils import MAX_TRAIN_SET_SIZE
 
 logger = logging.getLogger(__name__)
 logging.getLogger("httpx").setLevel(logging.WARN)
 
-# Suppress tokenizer warnings
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
-
-def to_list_int(data):
-    """Recursively converts tensors/arrays to standard python int lists"""
-    if hasattr(data, "tolist"):
-        data = data.tolist()
-    elif isinstance(data, torch.Tensor):
-        data = data.detach().cpu().tolist()
-    return [int(x) for x in data]
-
-def to_list_float(data):
-    """Recursively converts tensors/arrays to standard python float lists"""
-    if hasattr(data, "tolist"):
-        data = data.tolist()
-    elif isinstance(data, torch.Tensor):
-        data = data.detach().cpu().tolist()
-    return [float(x) for x in data]
 
 @chz.chz
 class Config:
@@ -51,31 +29,24 @@ class Config:
     wandb_name: str | None = "hapo_lite_100"
     
     # --- Data & Paths ---
-    # LIGHTWEIGHT DATASET (100 Samples)
     train_dataset: str = "datasets/train_samples_math_100.json" 
     valid_dataset: str = "datasets/valid_samples_dsr_500.json"
-    base_url: str | None = None
     log_path: str = "../tinker-experiments/hapo-lite-100"
     
     # --- Model ---
-    # Defaulting to 4B. 
-    # Use 1.5B if available for max speed.
     model_name: str = "Qwen/Qwen3-4B-Instruct-2507" 
     
     # --- HAPO Training Hyperparameters ---
-    num_epochs: int = 10          # Increased epochs for small data
-    learning_rate: float = 1e-5 
-    batch_size: int = 2           
-    group_size: int = 2           
-    gradient_accumulation_steps: int = 4 
+    num_epochs: int = 10
+    learning_rate: float = 1e-5
+    batch_size: int = 2
+    group_size: int = 2
+    gradient_accumulation_steps: int = 4
+    max_tokens: int = 8192
+    lora_rank: int = 8
     
-    # Context Length
-    max_tokens: int = 8192       
-    
-    lora_rank: int = 8            
-    
-    # Save every 5 epochs (approx 60 steps)
-    save_every: int = 60          
+    # Save every 5 epochs (60 steps)
+    save_every: int = 60
     
     # --- Reward & Algorithm Parameters ---
     beta: float = 0.04            
@@ -99,7 +70,7 @@ class Config:
 
 def evaluate(client, dataset, renderer, config):
     logger.info("Running validation evaluation...")
-    sampling_params = tinker.types.SamplingParams(
+    sampling_params = types.SamplingParams(
         max_tokens=config.max_tokens,
         stop=renderer.get_stop_sequences(),
         temperature=config.eval_temperature,
@@ -148,9 +119,14 @@ def evaluate(client, dataset, renderer, config):
                 logger.error(f"Error during eval sample: {e}")
                 
             total_count += 1
-            
-    pass_at_1 = correct_count / total_count if total_count > 0 else 0.0
+
+    try:
+        pass_at_1 = correct_count / total_count
+    except ZeroDivisionError:
+        logger.error(f"Error calculating pass@1: total_count = 0")
+
     logger.info(f"Validation Pass@1: {pass_at_1:.4f} ({correct_count}/{total_count})")
+
     return pass_at_1
 
 
@@ -160,7 +136,7 @@ def main(config: Config):
         wandb_project=config.wandb_project,
         wandb_name=config.wandb_name,
         config=config,
-        do_configure_logging_module=True,
+        do_configure_logging_module=True
     )
 
     tokenizer = get_tokenizer(config.model_name)
@@ -187,15 +163,15 @@ def main(config: Config):
         }
 
     logger.info(f"Loading training data: {config.train_dataset}")
-    train_dataset = datasets.load_dataset("json", data_files=config.train_dataset, split="train")
+    train_dataset = load_dataset("json", data_files=config.train_dataset, split="train")
     train_dataset = train_dataset.map(prepare_example, with_indices=True)
 
     logger.info(f"Loading validation data: {config.valid_dataset}")
-    valid_dataset = datasets.load_dataset("json", data_files=config.valid_dataset, split="train")
+    valid_dataset = load_dataset("json", data_files=config.valid_dataset, split="train")
     valid_dataset = valid_dataset.map(prepare_example, with_indices=True)
 
     # --- Client Setup ---
-    service_client = tinker.ServiceClient(base_url=config.base_url)
+    service_client = tinker.ServiceClient()
 
     logger.info("Initializing Student Model Client...")
     training_client = service_client.create_lora_training_client(
@@ -204,20 +180,20 @@ def main(config: Config):
     )
 
     logger.info("Initializing Reference Model Client from Init Weights...")
-    init_weights_path = training_client.save_weights_for_sampler(name="init").result().path
-    ref_client = service_client.create_sampling_client(model_path=init_weights_path)
+    ref_client = service_client.create_lora_training_client(
+        base_model=config.model_name,
+        rank=config.lora_rank
+    )
 
     best_pass_at_1 = 0.0
     start_global_step = 0
 
-    sampling_params = tinker.types.SamplingParams(
+    sampling_params = types.SamplingParams(
         max_tokens=config.max_tokens,
         stop=renderer.get_stop_sequences(),
         temperature=config.temperature
     )
     
-    # Note: adam_params will be instantiated per step to handle LR scheduling
-
     steps_per_epoch = (len(train_dataset) // config.batch_size) // config.gradient_accumulation_steps
     total_optimizer_steps = steps_per_epoch * config.num_epochs
     
@@ -233,10 +209,6 @@ def main(config: Config):
         n_batches_per_epoch = len(shuffled_dataset) // config.batch_size
         
         for batch_i in range(n_batches_per_epoch):
-            current_optimizer_step = (batch_i + (epoch * n_batches_per_epoch)) // config.gradient_accumulation_steps
-            if current_optimizer_step < start_global_step:
-                continue
-
             is_start_of_accum = (batch_i % config.gradient_accumulation_steps == 0)
             
             # --- Checkpointing & Eval ---
@@ -252,7 +224,6 @@ def main(config: Config):
                 )
                 tracker.save_state(os.path.join(config.log_path, f"tracker_{global_step:06d}.pkl"))
 
-                # SHORTCUT METHOD
                 eval_client = training_client.save_weights_and_get_sampling_client(name="eval_temp")
                 curr_pass_at_1 = evaluate(eval_client, valid_dataset, renderer, config)
                 ml_logger.log_metrics({"eval/pass_at_1": curr_pass_at_1}, step=global_step)
@@ -262,18 +233,17 @@ def main(config: Config):
                     best_pass_at_1 = curr_pass_at_1
                     checkpoint_utils.save_checkpoint(
                         training_client=training_client,
-                        name="best_checkpoint",
+                        name=f"best_checkpoint_{global_step}",
                         log_path=config.log_path,
                         kind="both",
                         loop_state={"batch": global_step, "accuracy": best_pass_at_1},
                     )
 
-            # --- Load Micro-Batch ---
+            # --- Load Batch ---
             batch_start = batch_i * config.batch_size
             batch_end = min((batch_i + 1) * config.batch_size, len(shuffled_dataset))
             batch_rows = shuffled_dataset.select(range(batch_start, batch_end))
 
-            # SHORTCUT METHOD
             sampling_client = training_client.save_weights_and_get_sampling_client(name="latest")
 
             batch_futures = []
@@ -323,35 +293,20 @@ def main(config: Config):
                     group_ob_lens.append(len(prompt_tokens) - 1)
                     
                     parsed_msg, _ = renderer.parse_response(s_tokens)
-                    content = parsed_msg["content"] if parsed_msg and "content" in parsed_msg else ""
+                    content = parsed_msg["content"]
                     group_texts.append(content)
 
-                # --- REFERENCE FORWARD PASS (Use compute_logprobs list directly) ---
+                # --- Reference Forward Pass---
                 ref_logprobs_sums = []
-                for seq_tokens, ob_len in zip(group_tokens, group_ob_lens):
-                    full_tokens_safe = to_list_int(seq_tokens)
+                for seq_tokens, ob_len in zip(group_tokens, group_ob_lens):                    
+                    ref_model_input = types.ModelInput.from_ints(tokens=seq_tokens)
+                    logprobs_list = ref_client.compute_logprobs(ref_model_input).result()
                     
-                    try:
-                        ref_model_input = types.ModelInput.from_ints(tokens=full_tokens_safe)
-                        logprobs_list = ref_client.compute_logprobs(ref_model_input).result()
-                        
-                        if not logprobs_list:
-                            # Fallback to avoid crash if ref model fails
-                            ref_sum = sum(group_logprobs[group_tokens.index(seq_tokens)])
-                        else:
-                            prompt_len = len(prompt_tokens)
-                            if len(logprobs_list) > prompt_len:
-                                response_logprobs = logprobs_list[prompt_len:]
-                                clean_response_logprobs = [lp if lp is not None else 0.0 for lp in response_logprobs]
-                                ref_sum = sum(clean_response_logprobs)
-                            else:
-                                ref_sum = 0.0
-                        
-                        ref_logprobs_sums.append(ref_sum)
-                        
-                    except Exception as e:
-                        logger.error(f"DEBUG: ref_client.compute_logprobs FAILED. Error: {e}")
-                        raise e
+                    prompt_len = len(prompt_tokens)
+                    response_logprobs = logprobs_list[prompt_len:]
+                    ref_sum = sum(response_logprobs)
+                    
+                    ref_logprobs_sums.append(ref_sum)
 
                 # Rewards
                 pids_expanded = [pid] * len(group_texts)
@@ -386,9 +341,9 @@ def main(config: Config):
                     input_tokens = tokens[:-1]
                     target_tokens = tokens[1:]
                     
-                    target_tokens_safe = to_list_int(target_tokens)
-                    all_logprobs_safe = to_list_float([0.0] * ob_len + logprob)
-                    all_advantages_safe = to_list_float([0.0] * ob_len + [adv] * (len(input_tokens) - ob_len))
+                    target_tokens_safe = target_tokens
+                    all_logprobs_safe = [0.0] * ob_len + logprob
+                    all_advantages_safe = [0.0] * ob_len + [adv] * (len(input_tokens) - ob_len)
                     
                     datum = types.Datum(
                         model_input=types.ModelInput.from_ints(tokens=input_tokens),
@@ -403,28 +358,20 @@ def main(config: Config):
                 tracker.update_batch_history(pids_expanded, group_texts, gts_expanded)
 
             # --- Accumulate Gradients Immediately ---
-            if batch_datums:
-                try:
-                    _ = training_client.forward_backward(
-                        batch_datums, "importance_sampling"
-                    ).result()
-                except Exception as e:
-                    logger.error(f"DEBUG: training_client.forward_backward FAILED. Error: {e}")
-                    raise e
+            _ = training_client.forward_backward(batch_datums, "importance_sampling").result()
             
-            avg_reward = sum(batch_rewards_log) / len(batch_rewards_log) if batch_rewards_log else 0.0
-            avg_kl = sum(batch_kl_log) / len(batch_kl_log) if batch_kl_log else 0.0
+            avg_reward = sum(batch_rewards_log) / len(batch_rewards_log)
+            avg_kl = sum(batch_kl_log) / len(batch_kl_log)
             accum_metrics["reward"].append(avg_reward)
             accum_metrics["kl"].append(avg_kl)
 
             if ((batch_i + 1) % config.gradient_accumulation_steps == 0) or ((batch_i + 1) == n_batches_per_epoch):
-                
-                # --- LINEAR LR SCHEDULER ---
+                # --- Linear lr scheduler ---
                 progress = global_step / total_optimizer_steps
                 current_lr = config.learning_rate * (1.0 - progress)
                 current_lr = max(0.0, current_lr)
                 
-                # Create NEW immutable AdamParams object for each step
+                # Create new AdamParams object for each step
                 current_adam_params = types.AdamParams(
                     learning_rate=current_lr, 
                     beta1=0.9, 
@@ -434,10 +381,8 @@ def main(config: Config):
 
                 _ = training_client.optim_step(current_adam_params).result()
                 
-                final_reward = sum(accum_metrics["reward"]) / len(accum_metrics["reward"]) if accum_metrics["reward"] else 0.0
-                final_kl = sum(accum_metrics["kl"]) / len(accum_metrics["kl"]) if accum_metrics["kl"] else 0.0
-                
-                avg_kl_per_token = final_kl / 200.0 # Approx
+                final_reward = sum(accum_metrics["reward"]) / len(accum_metrics["reward"])
+                final_kl = sum(accum_metrics["kl"]) / len(accum_metrics["kl"])
                 
                 metrics = {
                     "progress/global_step": global_step,
@@ -447,7 +392,7 @@ def main(config: Config):
                     "metrics/kl": final_kl
                 }
                 ml_logger.log_metrics(metrics, step=global_step)
-                logger.info(f"Step {global_step} | LR: {current_lr:.2e} | Reward: {final_reward:.4f} | KL (Seq): {final_kl:.4f} | ~KL/tok: {avg_kl_per_token:.4f}")
+                logger.info(f"Step {global_step} | LR: {current_lr:.2e} | Reward: {final_reward:.4f} | KL: {final_kl:.4f}")
 
                 accum_metrics = {"reward": [], "kl": []}
                 global_step += 1
