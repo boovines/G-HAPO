@@ -175,10 +175,16 @@ def main(config: Config):
     # Configure logging
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
     
-    # Load ReClor test dataset
+    # Load ReClor test dataset (handles both JSON and JSONL formats)
     try:
         with open(config.data_path, 'r') as f:
-            raw_data = json.load(f)
+            content = f.read().strip()
+            # Try standard JSON first
+            try:
+                raw_data = json.loads(content)
+            except json.JSONDecodeError:
+                # Fall back to JSONL (one JSON object per line)
+                raw_data = [json.loads(line) for line in content.split('\n') if line.strip()]
     except FileNotFoundError:
         logger.error(f"Could not find dataset at {config.data_path}")
         return
