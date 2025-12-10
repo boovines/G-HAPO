@@ -4,13 +4,13 @@ import numpy as np
 
 # Load datasets
 # s1k
-s1k_df = pd.read_json("./datasets/s1k_answers_subset.json", lines=True)
+s1k_df = pd.read_json("../datasets/s1k_answers_subset.json", lines=True)
 
 # reclor (val.json)
-reclor_df = pd.read_json("./datasets/ReClor/val.json")
+reclor_df = pd.read_json("../datasets/ReClor/val.json")
 
 # hapo math (train_samples_math_100.json)
-hapo_df = pd.read_json("./datasets/train_samples_math_100.json")
+hapo_df = pd.read_json("../datasets/train_samples_math_100.json")
 
 # Set random seed for reproducibility
 np.random.seed(42)

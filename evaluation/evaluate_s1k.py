@@ -27,7 +27,7 @@ class Config:
     eval_top_p: float = 0.95
     eval_batch_size: int = 4
     # Default to the s1k subset test file
-    data_path: str = "datasets/test_s1k.json" 
+    data_path: str = "../datasets/test_s1k.json" 
 
 def extract_answer_content(text: str) -> str:
     """

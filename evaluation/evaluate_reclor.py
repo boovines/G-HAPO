@@ -25,7 +25,7 @@ class Config:
     eval_temperature: float = 0.6
     eval_top_p: float = 0.95
     eval_batch_size: int = 4
-    data_path: str = "datasets/test_reclor.json"#"datasets/ReClor/val.json"
+    data_path: str = "../datasets/test_reclor.json" #"../datasets/ReClor/val.json"
 
 def is_correct_textual(response: str, ground_truth: str) -> bool:
     """

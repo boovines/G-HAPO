@@ -58,12 +58,12 @@ class Config:
     # --- Sampling ---
     temperature: float = 0.7      
     
-    # Evaluation Params
+    # --- Evaluation Params ---
     eval_temperature: float = 0.6 
     eval_top_p: float = 0.95      
     eval_batch_size: int = 4
     
-    # Repetition Penalty
+    # --- Repetition Penalty ---
     rep_ngram_size: int = 3
     rep_penalty: float = 0.0
 
@@ -83,10 +83,7 @@ def evaluate(client, dataset, renderer, config):
     n_batches = (len(dataset) + config.eval_batch_size - 1) // config.eval_batch_size
     
     for i in range(n_batches):
-        batch = dataset.select(range(
-            i * config.eval_batch_size, 
-            min((i + 1) * config.eval_batch_size, len(dataset))
-        ))
+        batch = dataset.select(range(i * config.eval_batch_size, min((i + 1) * config.eval_batch_size, len(dataset))))
         
         prompt_futures = []
         ground_truths = batch["ground_truth"]
@@ -111,7 +108,7 @@ def evaluate(client, dataset, renderer, config):
                 result = future.result()
                 tokens = result.sequences[0].tokens
                 parsed, _ = renderer.parse_response(tokens)
-                content = parsed["content"] if parsed and "content" in parsed else ""
+                content = parsed["content"]
                 
                 if is_correct(content, gt, use_math_verify=True):
                     correct_count += 1
@@ -203,6 +200,8 @@ def main(config: Config):
     global_step = start_global_step
     accum_metrics = {"reward": [], "kl": []}
     
+    logger.info(f"Starting Training: {config.num_epochs} Epochs")
+
     for epoch in range(config.num_epochs):
         logger.info(f"Starting Epoch {epoch + 1}/{config.num_epochs}")
         shuffled_dataset = train_dataset.shuffle(seed=42 + epoch)
@@ -312,9 +311,7 @@ def main(config: Config):
                 pids_expanded = [pid] * len(group_texts)
                 gts_expanded = [ground_truth] * len(group_texts)
                 
-                base_rewards = tracker.calculate_rewards(
-                    pids_expanded, group_texts, gts_expanded
-                )
+                base_rewards = tracker.calculate_rewards(pids_expanded, group_texts, gts_expanded)
                 
                 final_rewards = []
                 for i in range(len(base_rewards)):
@@ -330,6 +327,7 @@ def main(config: Config):
 
                 batch_rewards_log.extend(final_rewards)
 
+                # GRPO Normalization
                 rewards_t = torch.tensor(final_rewards, dtype=torch.float32)
                 mean = rewards_t.mean()
                 std = rewards_t.std(unbiased=False) + 1e-8
@@ -340,24 +338,22 @@ def main(config: Config):
                 ):
                     input_tokens = tokens[:-1]
                     target_tokens = tokens[1:]
-                    
-                    target_tokens_safe = target_tokens
-                    all_logprobs_safe = [0.0] * ob_len + logprob
-                    all_advantages_safe = [0.0] * ob_len + [adv] * (len(input_tokens) - ob_len)
+                    all_logprobs = [0.0] * ob_len + logprob
+                    all_advantages = [0.0] * ob_len + [adv] * (len(input_tokens) - ob_len)
                     
                     datum = types.Datum(
                         model_input=types.ModelInput.from_ints(tokens=input_tokens),
                         loss_fn_inputs={
-                            "target_tokens": target_tokens_safe,
-                            "logprobs": all_logprobs_safe,
-                            "advantages": all_advantages_safe,
+                            "target_tokens": target_tokens,
+                            "logprobs": all_logprobs,
+                            "advantages": all_advantages,
                         },
                     )
                     batch_datums.append(datum)
                 
                 tracker.update_batch_history(pids_expanded, group_texts, gts_expanded)
 
-            # --- Accumulate Gradients Immediately ---
+            # --- Accumulate Gradients ---
             _ = training_client.forward_backward(batch_datums, "importance_sampling").result()
             
             avg_reward = sum(batch_rewards_log) / len(batch_rewards_log)
@@ -368,8 +364,7 @@ def main(config: Config):
             if ((batch_i + 1) % config.gradient_accumulation_steps == 0) or ((batch_i + 1) == n_batches_per_epoch):
                 # --- Linear lr scheduler ---
                 progress = global_step / total_optimizer_steps
-                current_lr = config.learning_rate * (1.0 - progress)
-                current_lr = max(0.0, current_lr)
+                current_lr = max(0.0, config.learning_rate * (1.0 - progress))
                 
                 # Create new AdamParams object for each step
                 current_adam_params = types.AdamParams(

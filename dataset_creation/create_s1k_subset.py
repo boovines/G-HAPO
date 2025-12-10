@@ -20,7 +20,7 @@ import re
 import os
 
 # 1. Load the dataset
-df = pd.read_csv("./datasets/s1k_train.csv")
+df = pd.read_csv("../datasets/s1k_train.csv")
 
 # 2. Define regex patterns for explicit answer markers and proof markers
 patterns = {

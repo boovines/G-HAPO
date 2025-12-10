@@ -2,7 +2,7 @@ import json
 import random
 
 # Load original
-with open("datasets/train_samples_math_2000.json", "r") as f:
+with open("../datasets/train_samples_math_2000.json", "r") as f:
     data = json.load(f)
 
 # Sample 100 (Seed for reproducibility)
