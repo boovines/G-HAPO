@@ -218,7 +218,7 @@ def main(config: Config):
     # Create sampling client
     service_client = tinker.ServiceClient()
     training_client = service_client.create_lora_training_client(base_model=model_name, rank=8)
-    training_client.load_state("tinker://d88742cc-b842-58bd-9c6e-16281f28b3a0:train:0/weights/000120")
+    # training_client.load_state("tinker://d88742cc-b842-58bd-9c6e-16281f28b3a0:train:0/weights/000120")
     sampling_client = training_client.save_weights_and_get_sampling_client(name="HAPO")
     logger.info(f"Created sampling client for HAPO model")
     
