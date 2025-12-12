@@ -11,6 +11,7 @@ import tinker_cookbook.model_info as model_info
 import tinker_cookbook.renderers as renderers
 from tinker_cookbook.tokenizer_utils import get_tokenizer
 from tqdm import tqdm
+import os
 
 import sys
 # Get the directory of the current script

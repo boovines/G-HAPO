@@ -9,6 +9,7 @@ import tinker_cookbook.renderers as renderers
 from tinker_cookbook.tokenizer_utils import get_tokenizer
 import logging
 from tqdm import tqdm
+import os
 
 import sys
 # Get the directory of the current script
