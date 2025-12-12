@@ -1,2 +1,2 @@
-# SEPO
-Semantic Efficient Policy Optimization
+# G-HAPO
+Generalized History Aware Policy Optimization
